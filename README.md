@@ -43,7 +43,19 @@ python3 evaluate.py --ckpt_path checkpoints/rnn_add_best.pt --model_type rnn --a
 ```
 Results are appended to `evaluation_results.json`.
 
-## 3. Visualization
+## 3. Inference
+Use `inference.py` to translate single sentences using a trained model.
+
+Download the trained Transformer checkpoint from [here](https://drive.google.com/file/d/1KYhS-6gfpkgr6VBVhe0ixVMYOlaxVZO1/view?usp=sharing) and place it in the `checkpoints/` directory.
+
+```bash
+python3 inference.py \
+    --sentence "我爱机器学习。" \
+    --ckpt_path checkpoints/transformer_cn2en.pt \
+    --model_type transformer \
+```
+
+## 4. Visualization
 Use `visualize.py` to plot training loss and validation metrics from the generated log files.
 
 ### Single/Multi-Log Visualization

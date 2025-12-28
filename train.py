@@ -9,6 +9,7 @@ from tqdm import tqdm
 import sacrebleu
 import time
 import math
+from nltk.tokenize.treebank import TreebankWordDetokenizer
 
 import config
 from data.dataprocess import load_and_process_data, TranslationDataset, collate_fn, PAD_IDX, BOS_IDX, EOS_IDX, UNK_IDX, build_vocab, TRAIN_PATH, VALID_PATH, TEST_PATH
@@ -20,7 +21,7 @@ def load_vocab(path):
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-def train_epoch(model, dataloader, optimizer, criterion, device, clip_grad, teacher_forcing_ratio, scheduler=None):
+def train_epoch(model, dataloader, optimizer, criterion, device, clip_grad, teacher_forcing_ratio, src_lang='en', tgt_lang='zh', scheduler=None):
     model.train()
     epoch_loss = 0
     
@@ -28,9 +29,9 @@ def train_epoch(model, dataloader, optimizer, criterion, device, clip_grad, teac
         optimizer.zero_grad()
         
         if model.__class__.__name__ == 'T5NMT':
-            # T5 Training: Zh -> En
-            src_text = batch['zh_raw']
-            tgt_text = batch['en_raw']
+            # T5 Training
+            src_text = batch[f'{src_lang}_raw']
+            tgt_text = batch[f'{tgt_lang}_raw']
             loss, _ = model(src_text, tgt_text)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
@@ -38,8 +39,8 @@ def train_epoch(model, dataloader, optimizer, criterion, device, clip_grad, teac
             epoch_loss += loss.item()
             continue
 
-        src = batch['en_ids'].to(device)
-        tgt = batch['zh_ids'].to(device)
+        src = batch[f'{src_lang}_ids'].to(device)
+        tgt = batch[f'{tgt_lang}_ids'].to(device)
         
         # src: [batch, src_len], tgt: [batch, tgt_len]
         # For Transformer, we need to handle masks inside the model or here.
@@ -89,7 +90,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, clip_grad, teac
         
     return epoch_loss / len(dataloader)
 
-def evaluate(model, dataloader, criterion, device, tokenizer_vocab, decoding_strategy='greedy', beam_size=3):
+def evaluate(model, dataloader, criterion, device, tokenizer_vocab, decoding_strategy='greedy', beam_size=3, src_lang='en', tgt_lang='zh'):
     model.eval()
     epoch_loss = 0
     hypotheses = []
@@ -97,12 +98,13 @@ def evaluate(model, dataloader, criterion, device, tokenizer_vocab, decoding_str
     
     # Reverse vocab for decoding
     idx2word = {v: k for k, v in tokenizer_vocab.items()}
+    detokenizer = TreebankWordDetokenizer()
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating"):
             if model.__class__.__name__ == 'T5NMT':
-                src_text = batch['zh_raw']
-                tgt_text = batch['en_raw']
+                src_text = batch[f'{src_lang}_raw']
+                tgt_text = batch[f'{tgt_lang}_raw']
                 
                 # Loss
                 loss, _ = model(src_text, tgt_text)
@@ -116,8 +118,8 @@ def evaluate(model, dataloader, criterion, device, tokenizer_vocab, decoding_str
                 references.extend(tgt_text)
                 continue
 
-            src = batch['en_ids'].to(device)
-            tgt = batch['zh_ids'].to(device)
+            src = batch[f'{src_lang}_ids'].to(device)
+            tgt = batch[f'{tgt_lang}_ids'].to(device)
             
             # Calculate Loss
             if model.__class__.__name__ == 'Seq2SeqRNN':
@@ -158,14 +160,17 @@ def evaluate(model, dataloader, criterion, device, tokenizer_vocab, decoding_str
                         break
                     if idx not in [BOS_IDX, PAD_IDX]:
                         tokens.append(idx2word.get(idx, '<unk>'))
-                hypotheses.append("".join(tokens)) # Chinese: join without spaces usually, but let's check
+                
+                if tgt_lang == 'zh':
+                    hypotheses.append("".join(tokens))
+                else:
+                    hypotheses.append(detokenizer.detokenize(tokens))
                 
                 # Reference
-                # batch['zh_raw'] contains the raw text
-                references.append(batch['zh_raw'][i])
+                references.append(batch[f'{tgt_lang}_raw'][i])
                 
     # Calculate BLEU
-    if model.__class__.__name__ == 'T5NMT':
+    if tgt_lang == 'en':
         # En target
         bleu = sacrebleu.corpus_bleu(hypotheses, [references], tokenize='13a')
     else:
@@ -191,6 +196,8 @@ def main():
     parser.add_argument('--teacher_forcing_ratio', type=float, default=0.5)
     parser.add_argument('--decoding_strategy', type=str, default='greedy', choices=['greedy', 'beam'])
     parser.add_argument('--beam_size', type=int, default=3)
+    parser.add_argument('--src_lang', type=str, default='en', choices=['en', 'zh'], help="Source language")
+    parser.add_argument('--tgt_lang', type=str, default='zh', choices=['en', 'zh'], help="Target language")
     
     # Training args
     parser.add_argument('--batch_size', type=int, default=512)
@@ -241,10 +248,19 @@ def main():
     
     # Initialize Model
     print(f"Initializing {args.model_type} model...")
+    
+    # Determine vocab sizes based on direction
+    if args.src_lang == 'en':
+        src_vocab = en_vocab
+        tgt_vocab = zh_vocab
+    else:
+        src_vocab = zh_vocab
+        tgt_vocab = en_vocab
+        
     if args.model_type == 'rnn':
         model_config = config.RNN_CONFIG.copy()
         model_config['attention_type'] = args.attention_type
-        model = create_rnn_model(len(en_vocab), len(zh_vocab), model_config)
+        model = create_rnn_model(len(src_vocab), len(tgt_vocab), model_config)
     elif args.model_type == 'transformer':
         model_config = config.TRANSFORMER_CONFIG.copy()
         model_config['position_encoding'] = args.position_encoding
@@ -260,7 +276,7 @@ def main():
             model_config['num_decoder_layers'] = args.num_decoder_layers
         if args.dim_feedforward is not None:
             model_config['dim_feedforward'] = args.dim_feedforward
-        model = create_transformer_model(len(en_vocab), len(zh_vocab), model_config)
+        model = create_transformer_model(len(src_vocab), len(tgt_vocab), model_config)
         
         # Adjust LR for Transformer if using default
         if args.lr == 0.001:
@@ -290,13 +306,15 @@ def main():
         
         train_loss = train_epoch(
             model, train_loader, optimizer, criterion, device, 
-            config.TRAIN_CONFIG['clip_grad'], args.teacher_forcing_ratio
+            config.TRAIN_CONFIG['clip_grad'], args.teacher_forcing_ratio,
+            src_lang=args.src_lang, tgt_lang=args.tgt_lang
         )
         print(f"Train Loss: {train_loss:.4f}")
         
         val_loss, val_bleu = evaluate(
-            model, valid_loader, criterion, device, zh_vocab, 
-            decoding_strategy=args.decoding_strategy, beam_size=args.beam_size
+            model, valid_loader, criterion, device, tgt_vocab, 
+            decoding_strategy=args.decoding_strategy, beam_size=args.beam_size,
+            src_lang=args.src_lang, tgt_lang=args.tgt_lang
         )
         print(f"Val Loss: {val_loss:.4f} | Val BLEU: {val_bleu:.2f}")
         

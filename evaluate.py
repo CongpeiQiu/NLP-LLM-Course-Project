@@ -19,6 +19,8 @@ def main():
     parser.add_argument('--beam_size', type=int, default=3, help="Beam size for decoding")
     parser.add_argument('--batch_size', type=int, default=32, help="Batch size")
     parser.add_argument('--output_file', type=str, default='evaluation_results.json', help="File to save evaluation results")
+    parser.add_argument('--src_lang', type=str, default='en', choices=['en', 'zh'], help="Source language")
+    parser.add_argument('--tgt_lang', type=str, default='zh', choices=['en', 'zh'], help="Target language")
     
     # Model configuration args (must match training)
     parser.add_argument('--model_type', type=str, default='rnn', choices=['rnn', 'transformer', 't5'])
@@ -53,10 +55,19 @@ def main():
 
     # Initialize Model
     print(f"Initializing {args.model_type} model...")
+    
+    # Determine vocab sizes based on direction
+    if args.src_lang == 'en':
+        src_vocab = en_vocab
+        tgt_vocab = zh_vocab
+    else:
+        src_vocab = zh_vocab
+        tgt_vocab = en_vocab
+        
     if args.model_type == 'rnn':
         model_config = config.RNN_CONFIG.copy()
         model_config['attention_type'] = args.attention_type
-        model = create_rnn_model(len(en_vocab), len(zh_vocab), model_config)
+        model = create_rnn_model(len(src_vocab), len(tgt_vocab), model_config)
     elif args.model_type == 'transformer':
         model_config = config.TRANSFORMER_CONFIG.copy()
         model_config['position_encoding'] = args.position_encoding
@@ -66,7 +77,7 @@ def main():
         if args.num_encoder_layers is not None: model_config['num_encoder_layers'] = args.num_encoder_layers
         if args.num_decoder_layers is not None: model_config['num_decoder_layers'] = args.num_decoder_layers
         if args.dim_feedforward is not None: model_config['dim_feedforward'] = args.dim_feedforward
-        model = create_transformer_model(len(en_vocab), len(zh_vocab), model_config)
+        model = create_transformer_model(len(src_vocab), len(tgt_vocab), model_config)
     elif args.model_type == 't5':
         model_config = config.T5_CONFIG.copy()
         model = create_t5_model(model_config['model_name'], device=device)
@@ -87,8 +98,9 @@ def main():
     print(f"Starting evaluation with strategy '{args.decoding_strategy}' (beam_size={args.beam_size})...")
     
     loss, bleu = evaluate(
-        model, test_loader, criterion, device, zh_vocab, 
-        decoding_strategy=args.decoding_strategy, beam_size=args.beam_size
+        model, test_loader, criterion, device, tgt_vocab, 
+        decoding_strategy=args.decoding_strategy, beam_size=args.beam_size,
+        src_lang=args.src_lang, tgt_lang=args.tgt_lang
     )
 
     print(f"\nEvaluation Results:")
@@ -99,6 +111,8 @@ def main():
     result = {
         'ckpt_path': args.ckpt_path,
         'model_type': args.model_type,
+        'src_lang': args.src_lang,
+        'tgt_lang': args.tgt_lang,
         'decoding_strategy': args.decoding_strategy,
         'beam_size': args.beam_size,
         'loss': loss,
